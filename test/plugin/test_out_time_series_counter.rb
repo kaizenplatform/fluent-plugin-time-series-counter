@@ -21,8 +21,26 @@ class TimeSeriesCounterTest < Test::Unit::TestCase
   sub_test_case 'configuration' do
     test 'basic configuration' do
       d = create_driver
-      assert_equal 'id', d.instance.count_key
-      assert_equal 'hour', d.instance.unit
+      assert_equal ['id'], d.instance.count_keys
+      assert_equal ['hour'], d.instance.unit
+    end
+
+    test 'invalid configration' do
+      assert_raise(Fluent::ConfigError) {
+        create_driver(
+          <<~EOS
+            count_key id
+          EOS
+        )
+      }
+
+      assert_raise(Fluent::ConfigError) {
+        create_driver(
+          <<~EOS
+            unit hour
+          EOS
+        )
+      }
     end
   end
 
