@@ -1,113 +1,102 @@
-module Fluent
-  class TimeSeriesCounter < Fluent::BufferedOutput
-    Fluent::Plugin.register_output('time_series_counter', self)
+require 'fluent/plugin/output'
 
-    unless method_defined?(:log)
-      define_method('log') { $log }
+class Fluent::Plugin::TimeSeriesCounter < Fluent::Plugin::Output
+  Fluent::Plugin.register_output('time_series_counter', self)
+  helpers :event_emitter
+
+  config_param :tag, :string, default: "tsc"
+  config_param :count_keys, :array, value_type: :string, alias: :count_key
+  config_param :count_key_delimiter, :string, default: ":"
+  config_param :count_value_name, :string, default: "count"
+  config_param :unit, :array, value_type: :string
+  config_param :uniq_key, :string, default: "tsc_key"
+  config_param :unit_key, :string, default: "tsc_unit"
+  config_param :time_key, :string, default: "tsc_time"
+
+  def configure(conf)
+    super
+
+    @units = unit.inject({}) do |hash, i|
+      hash[i] = true
+      hash
     end
+  end
 
-    config_param :tag, :string, :default => "tsc"
-    config_param :count_key, :string, :default => nil
-    config_param :count_key_delimiter, :string, :default => ":"
-    config_param :count_value_name, :string, :default => "count"
-    config_param :unit, :string, :default => nil
-    config_param :uniq_key, :string, :default => "tsc_key"
-    config_param :unit_key, :string, :default => "tsc_unit"
-    config_param :time_key, :string, :default => "tsc_time"
+  def formatted_to_msgpack_binary?
+    true
+  end
 
-    def initialize
-      super
-    end
 
-    def configure(conf)
-      super
+  def format(tag, time, record)
+    [tag, time, record].to_msgpack
+  end
 
-      if !count_key
-        raise ConfigError, "out_time_series_counter: required 'count_key' parameter."
-      end
+  def write(chunk)
+    stats = {}
 
-      if !unit
-        raise ConfigError, "out_time_series_counter: required 'unit' parameter."
-      end
+    chunk.msgpack_each do |tag, time, record|
+      skip = false
 
-      @count_keys = count_key.split(/\s*,\s*/).sort
-      @unit = unit.split(/\s*,\s*/).inject({}) do |hash, i|
-        hash[i] = true
-        hash
-      end
-    end
-
-    def format(tag, time, record)
-      [tag, time, record].to_msgpack
-    end
-
-    def write(chunk)
-      stats = {}
-      chunk.msgpack_each do |tag, time, record|
-        skip = false
-        next unless time
-        @count_keys.each do |k|
-          # skip record if a record does not have requried count_keys
-          skip = true unless record[k]
-        end
-        next if skip
-
-        if @unit['min']
-          count(stats, record, time, "min")
-        end
-
-        if @unit['hour']
-          count(stats, record, time, "hour")
-        end
-
-        if @unit['day']
-          count(stats, record, time, "day")
-        end
-      end
-
-      output_stats(stats)
-    end
-
-    private
-    def create_uniq_key(record, unit, time)
-      uniq_key = []
       @count_keys.each do |k|
-        uniq_key << record[k]
+        # skip record if a record does not have requried count_keys
+        skip = true unless record[k]
       end
-      uniq_key << time.to_s
-      uniq_key << unit
-      uniq_key.join(@count_key_delimiter)
+      next if skip
+
+      if @units['min']
+        count(stats, record, time, "min")
+      end
+
+      if @units['hour']
+        count(stats, record, time, "hour")
+      end
+
+      if @units['day']
+        count(stats, record, time, "day")
+      end
+    end
+    output_stats(stats)
+  end
+
+  private
+  def create_uniq_key(record, unit, time)
+    uniq_key = []
+    @count_keys.each do |k|
+      uniq_key << record[k]
+    end
+    uniq_key << time.to_s
+    uniq_key << unit
+    uniq_key.join(@count_key_delimiter)
+  end
+
+  def count(stats, record, time, unit)
+    case unit
+    when "min"
+      unit_time = time - (time % 60)
+    when "hour"
+      unit_time = time - (time % 3600)
+    when "day"
+      unit_time = time - (time % 86400)
+    else
+      return
     end
 
-    def count(stats, record, time, unit)
-      unix_time = 0
-      case unit
-      when "min"
-        unit_time = time - (time % 60)
-      when "hour"
-        unit_time = time - (time % 3600)
-      when "day"
-        unit_time = time - (time % 86400)
-      else
-        return
+    tsc_key = create_uniq_key(record, unit, unit_time)
+    unless stats[tsc_key]
+      stats[tsc_key] = {@count_value_name => 0} unless stats[tsc_key]
+      @count_keys.each do |k|
+        stats[tsc_key][k] = record[k]
       end
-      tsc_key = create_uniq_key(record, unit, unit_time)
-      unless stats[tsc_key]
-        stats[tsc_key] = {@count_value_name => 0} unless stats[tsc_key]
-        @count_keys.each do |k|
-          stats[tsc_key][k] = record[k]
-        end
-        stats[tsc_key][@unit_key] = unit
-        stats[tsc_key][@time_key] = unit_time
-      end
-      stats[tsc_key][@count_value_name] += 1
+      stats[tsc_key][@unit_key] = unit
+      stats[tsc_key][@time_key] = unit_time
     end
+    stats[tsc_key][@count_value_name] += 1
+  end
 
-    def output_stats(stats)
-      stats.each do |k, v|
-        v[@uniq_key] = k
-        Fluent::Engine.emit("#{@tag}", Fluent::Engine.now, v)
-      end
+  def output_stats(stats)
+    stats.each do |k, v|
+      v[@uniq_key] = k
+      router.emit(@tag, Fluent::Engine.now, v)
     end
   end
 end
